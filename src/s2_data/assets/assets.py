@@ -486,12 +486,13 @@ class AssetStore(object):
                     else:
                         asset.name_hash += b"\x00"
 
-                # The name hash of soundbank files is padded such that the data_offset is divisible by 16
-                # Padding is between 1 and 16 bytes
+                # The name hash of soundbank files is padded such that the data_offset is divisible by 32
+                # Padding is between 1 and 32 bytes
                 if asset.filename.endswith(b".bank"):
                     data_offset = offset + 8 + len(asset.name_hash) + 1
-                    padding = 16 - data_offset % 16
+                    padding = 32 - data_offset % 32
                     asset.name_hash += b"\x00" * padding
+                    print("Padded hash for {}: {!r}".format(asset.filename.decode(), binascii.hexlify(asset.name_hash)))
 
                 asset.name_len = len(asset.name_hash)
 
