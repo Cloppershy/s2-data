@@ -57,7 +57,7 @@ def quad_rounds(s):
 
 
 def sxor(x, y):
-    return bytes(bytearray(a ^ b for a, b in zip(bytearray(x), bytearray(y))))
+    return bytes(a ^ b for a, b in zip(x, y))
 
 
 def s_to_w(s):
@@ -159,21 +159,26 @@ def _chacha(name, data, key):
     if len(data) >= 0x40:
         blocks = len(data) // 0x40
         out += sxor(data, key[::-1] * blocks)
-        data = data[blocks * 0x40 :]
+        data = data[blocks * 0x40:]
     if len(data) > 0:
-        out += sxor(data, key[: len(data)][::-1])
+        out += sxor(data, key[:len(data)][::-1])
 
     return out
 
 
-def decrypt_data(name, data, key=0xBABE):
-    data = _chacha(name, data, key)
+def decompress_data(data):
     cctx = zstd.ZstdDecompressor()
-    data = cctx.decompress(data)
-    return data
+    return cctx.decompress(data)
 
 
-def encrypt_data(name, data, key=0xBABE, compression_level=DEFAULT_COMPRESSION_LEVEL):
+def compress_data(data, compression_level=DEFAULT_COMPRESSION_LEVEL):
     cctx = zstd.ZstdCompressor(level=compression_level)
-    data = cctx.compress(data)
+    return cctx.compress(data)
+
+
+def decrypt_data(name, data, key=0xBABE):
+    return _chacha(name, data, key)
+
+
+def encrypt_data(name, data, key=0xBABE):
     return _chacha(name, data, key)

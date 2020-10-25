@@ -2,9 +2,11 @@ from struct import pack, unpack
 from PIL import Image
 import binascii
 import io
+import os
 
-from .chacha import Key, filename_hash, decrypt_data, encrypt_data
+from .chacha import Key, filename_hash, decompress_data, compress_data, decrypt_data, encrypt_data
 
+START_OFFSET = 0x400
 KNOWN_ASSETS = [
     b"Data/Fonts/fontdebug.fnb",
     b"Data/Fonts/fontfirasans.fnb",
@@ -309,10 +311,11 @@ class Asset(object):
         self.data_offset = data_offset
         self.data_size = data_size
         self.filename = None
+        self.path = None
 
     @property
     def total_size(self):
-        return 8 + self.name_len + self.data_size
+        return 8 + self.name_len + self.asset_len
 
     def __repr__(self):
         return (
@@ -335,15 +338,20 @@ class Asset(object):
         l = min(len(hash), self.name_len)
         return hash[:l] == self.name_hash[:l]
 
-    def extract(self, filename, handle, key):
+    def extract(self, filename, handle, key, return_compressed=False):
         handle.seek(self.data_offset)
         data = handle.read(self.data_size)
+        compressed_data = None
         if self.encrypted:
             try:
-                data = decrypt_data(filename, data, key)
+                compressed_data = decrypt_data(filename, data, key)
+                data = decompress_data(compressed_data)
             except Exception as exc:
                 print(exc)
-                return None
+                if return_compressed:
+                    return None, None
+                else:
+                    return None
 
         if filename.endswith(b".png"):
             width, height = unpack(b"<II", data[:8])
@@ -352,7 +360,10 @@ class Asset(object):
             image.save(new_data, format="PNG")
             data = new_data.getvalue()
 
-        return data
+        if return_compressed:
+            return data, compressed_data
+        else:
+            return data
 
 
 class AssetStore(object):
@@ -387,61 +398,155 @@ class AssetStore(object):
             return None
         return filename_hash(filename, self.key)
 
-    def pack_asset(self, filename, new_data):
-        asset = self.find_asset(filename)
+    def repackage(self, mod_dirs, original_dir, compression_level):
+        sources = []
+        if isinstance(mod_dirs, str):
+            sources.append(bytes(mod_dirs, "utf-8"))
+        else:
+            sources.extend(bytes(dir, "utf-8") for dir in mod_dirs)
+        original_dir = bytes(original_dir, "utf-8")
+        sources.append(original_dir)
 
-        if asset.encrypted:
-            size_raw = len(new_data)
-            new_data = encrypt_data(filename, new_data, self.key)
+        print("Gathering assets for repackaging")
+        # Prepare compressed files and calculate new sizes
+        for asset in self.assets:
+            if asset.filename is None:
+                print("Skipping unknown asset with hash {!r}".format(binascii.hexlify(asset.name_hash)))
+                continue
+
+            for dir in sources:
+                path = os.path.join(dir, asset.filename)
+                compressed_path = path + b".zst"
+
+                if asset.encrypted and os.path.exists(compressed_path):
+                    # Use already compressed data for encrypted asset
+                    asset.path = compressed_path
+                    asset.data_size = os.path.getsize(compressed_path)
+                elif os.path.exists(path):
+                    if asset.encrypted:
+                        # Compress data for encrypted asset
+                        if path.endswith(b".png"):
+                            img = Image.open(path).convert("RGBA")
+                            data = pack("<II", img.width, img.height) + bytes(
+                                [
+                                    (
+                                        byte if rgba[3] != 0 else 0
+                                    )  # Hack to force all transparent pixels to be (0, 0, 0, 0) instead of (255, 255, 255, 0)
+                                    for rgba in img.getdata()
+                                    for byte in rgba
+                                ]
+                            )
+                        else:
+                            with open(path, "rb") as f:
+                                data = f.read()
+                        data = compress_data(data, compression_level)
+                        with open(compressed_path, "wb") as f:
+                            f.write(data)
+                        asset.path = compressed_path
+                        asset.data_size = len(data)
+                    else:
+                        # Use uncompressed data for unencrypted asset
+                        asset.path = path
+                        asset.data_size = os.path.getsize(path)
+                else:
+                    # Asset not found in this dir
+                    continue
+                
+                # Asset was found in this dir, update asset_len and total size
+                if dir != original_dir:
+                    print('Using "{}" from {}'.format(asset.filename.decode(), asset.path.decode())) 
+                asset.asset_len = asset.data_size + 1
+                break
+            else:
+                # Asset wasn't found in any dir
+                print("Didn't find extracted data for asset {}. Please run the extraction script first.".format(
+                    asset.filename.decode()
+                ))
+
+        # Recalculate encryption key based on new asset_lens
+        print("Calculating new encryption key")
+        self.recalculate_key()
+        print("New key is: 0x{:8x}".format(self.key))
+
+        # Recalculate file hashes. If filename is unknown, we can't calculate it and just use the old one.
+        new_total_size = 0
+        print("Calculating new name hashes")
+        offset = START_OFFSET
+        for asset in self.assets:
+            if asset.filename:
+                old_hash = asset.name_hash
+                asset.name_hash = filename_hash(asset.filename, self.key)
+
+                if False:  # For game version < 1.13
+                    # Hash was a null-terminated string, and mistakenly cut off early when the hash contained a null byte
+                    for i, byte in enumerate(asset.name_hash):
+                        if byte == 0:
+                            asset.name_hash = asset.name_hash[:i+1]
+                            break
+                    else:
+                        asset.name_hash += b"\x00"
+
+                # The name hash of soundbank files is padded such that the data_offset is divisible by 16
+                # Padding is between 1 and 16 bytes
+                if asset.filename.endswith(b".bank"):
+                    data_offset = offset + 8 + len(asset.name_hash) + 1
+                    padding = 16 - data_offset % 16
+                    asset.name_hash += b"\x00" * padding
+
+                asset.name_len = len(asset.name_hash)
+
+            asset.offset = offset
+            asset.data_offset = offset + 8 + asset.name_len + 1
+            offset += asset.total_size
+            new_total_size += asset.total_size
+
+        # Verify that new assets fit into the exe
+        size_diff = new_total_size - self.total_size
+        if size_diff > 0:
             print(
-                'Encrypting data for "{}" ({} bytes -> {} bytes)'.format(
-                    filename, size_raw, len(new_data)
-                )
-            )
-
-        old_size = asset.data_size
-        new_size = len(new_data)
-
-        if new_size > old_size:
-            print(
-                'Asset "{}" is larger than original ({} bytes > {} bytes), replacing currently not possible'.format(
-                    filename, new_size, old_size
+                "New total size is greater than original asset size ({} bytes > {} bytes, +{} bytes), unable to pack new assets.".format(
+                    new_total_size, self.total_size, size_diff
                 )
             )
             return False
-        elif new_size == old_size:
-            print(
-                'Replacing asset "{}" with same size ({} bytes)'.format(
-                    filename, new_size
-                )
-            )
-            self.exe_handle.seek(asset.data_offset)
-            self.exe_handle.write(new_data)
-        elif new_size < old_size:
-            print(
-                'Replacing asset "{}" with smaller size ({} bytes < {} bytes)'.format(
-                    filename, new_size, old_size
-                )
-            )
-            self.exe_handle.seek(asset.data_offset)
-            self.exe_handle.write(new_data)
+        self.total_size = new_total_size
+        print("New total size is {} bytes, {} less than original assets".format(new_total_size, -size_diff))
 
-            diff = old_size - new_size
-            if diff < 10:
-                print(
-                    "Difference is less than 10 bytes, not enoguh space to insert a padding asset. Things might break"
-                )
+        # Write new assets into file
+        print("Writing new binary...")
+        self.exe_handle.seek(START_OFFSET)
+        for idx, asset in enumerate(self.assets):
+            new_offset = self.exe_handle.tell()
+            print("\r{:3d}/{:3d} assets written (old offset: 0x{:08x}, new offset: 0x{:08x}), encrypted: {}, {:50s}".format(
+                idx + 1, len(self.assets), asset.offset, new_offset, asset.encrypted,
+                asset.filename.decode() if asset.filename is not None else "[unknown]"
+            ), end="")
+
+            assert asset.offset == new_offset
+            self.exe_handle.write(pack("<II", asset.asset_len, asset.name_len))
+
+            self.exe_handle.write(asset.name_hash)
+            self.exe_handle.write(b"\x01" if asset.encrypted else b"\x00")
+            assert asset.data_offset == self.exe_handle.tell()
+
+            if asset.path:
+                with open(asset.path, "rb") as f:
+                    data = f.read()
+                if asset.encrypted:
+                    data = encrypt_data(asset.filename, data, self.key)
+                self.exe_handle.write(data)
             else:
-                # Old/Replaced asset size
-                self.exe_handle.seek(asset.offset)
-                self.exe_handle.write(pack("<I", new_size + 1))
-                # New padding asset size (with name_len = 1)
-                self.exe_handle.seek(asset.data_offset + new_size)
-                self.exe_handle.write(pack("<II", diff - 9, 1))
+                self.exe_handle.write(b"\x00" * asset.data_size)
 
-        return True
+        print("\nFinishing file")
 
-    def _load_assets(self, offset=0x400):
+        # End marker
+        self.exe_handle.write(b"\x00" * 8)
+
+        # Overwrite rest of old data with padding
+        self.exe_handle.write(b"\xAA" * -size_diff)
+
+    def _load_assets(self, offset=START_OFFSET):
         self.exe_handle.seek(offset)
 
         while True:
@@ -459,15 +564,14 @@ class AssetStore(object):
             self.exe_handle.seek(data_size, 1)
             self._key.update(asset_len)
 
-            self.assets.append(
-                Asset(
-                    name_hash=name_hash,
-                    name_len=name_len,
-                    asset_len=asset_len,
-                    encrypted=encrypted,
-                    offset=offset,
-                    data_offset=data_offset,
-                    data_size=data_size,
-                )
+            asset = Asset(
+                name_hash=name_hash,
+                name_len=name_len,
+                asset_len=asset_len,
+                encrypted=encrypted,
+                offset=offset,
+                data_offset=data_offset,
+                data_size=data_size,
             )
-            self.total_size += (asset_len + data_offset) - offset
+            self.assets.append(asset)
+            self.total_size += asset.total_size

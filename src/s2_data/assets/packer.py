@@ -2,7 +2,7 @@ from PIL import Image
 from struct import pack
 import os
 
-from .assets import AssetStore
+from .assets import AssetStore, KNOWN_ASSETS
 
 KEEP_CONVERTED_RAW_IMAGES = False  # Keep .png.raw files with RGBA array after conversion (for debug purposes only)
 DEBUG_LIST_ASSETS = (
@@ -38,7 +38,7 @@ DEBUG_LIST_ASSETS = (
 # We overwrite the exit() call with NOPs
 PATCH_START = b"\x48\x3B\xC1\x74\x09\x33\xC9\xFF"
 PATCH_END = 0xCC
-PATCH_REPLACE = b"\x48\x3B\xC1\x74\x09" + b"\x90" * 10
+PATCH_REPLACE = b"\x48\x3B\xC1\x74\x09" + b"\x90" * 9
 
 
 class Patcher:
@@ -71,7 +71,6 @@ class Patcher:
 
         self.exe_handle.seek(index)
         ops = self.exe_handle.read(14)
-        print(repr(ops))
 
         if ops[-1] != PATCH_END:
             print(
@@ -129,54 +128,20 @@ def main():
             print("Exiting...")
             sys.exit(0)
 
-        print(f"Making copy of {args.source.name} to {args.dest}")
-        shutil.copy2(args.source.name, args.dest)
+    print(f"Making copy of {args.source.name} to {args.dest}")
+    shutil.copy2(args.source.name, args.dest)
 
     with open(args.dest, "rb+") as dest_file:
-        # patcher = Patcher(dest_file)
-        # patcher.patch()
-
-        count_replaced = 0
-        count_failed = 0
         asset_store = AssetStore(dest_file)
-        for dir, _, files in os.walk(args.asset_dir):
-            for file in files:
-                filepath = os.path.join(dir, file)
-                name = filepath.replace(args.asset_dir, "").replace("\\", "/")[1:]
+        for filename in KNOWN_ASSETS:
+            asset = asset_store.find_asset(filename)
+            if asset is not None:
+                asset.filename = filename
 
-                if name.endswith(".png.raw"):
-                    continue  # skip converted images
-                elif name.endswith(".png"):
-                    print('\nConverting image "{}" to RGBA array'.format(name))
-                    img = Image.open(filepath).convert("RGBA")
-                    new_data = pack("<II", img.width, img.height) + bytes(
-                        [
-                            (
-                                byte if rgba[3] != 0 else 0
-                            )  # Hack to force all transparent pixels to be (0, 0, 0, 0) instead of (255, 255, 255, 0)
-                            for rgba in img.getdata()
-                            for byte in rgba
-                        ]
-                    )
-                    if KEEP_CONVERTED_RAW_IMAGES:
-                        with open(filepath + ".raw", "wb") as f:
-                            f.write(new_data)
-                else:
-                    print("")
-                    with open(filepath, "rb") as f:
-                        new_data = f.read()
+        asset_store.repackage(args.asset_dir, "Extracted", args.compression_level)
 
-                if asset_store.pack_asset(name.encode(), new_data):
-                    count_replaced += 1
-                else:
-                    count_failed += 1
-
-        print("")
-        print(
-            "Successfully replaced {} files, {} errros".format(
-                count_replaced, count_failed
-            )
-        )
+        patcher = Patcher(dest_file)
+        patcher.patch()
 
 
 if __name__ == "__main__":

@@ -44,11 +44,14 @@ def main():
             continue
 
         print("Extracting {}... ".format(filename.decode()), end="")
-        data = asset.extract(filename, args.exe, asset_store.key)
+        data, compressed = asset.extract(filename, args.exe, asset_store.key, return_compressed=True)
         if not data:
             continue
         with open(dest_path, "wb") as f:
             f.write(data)
+        if compressed:
+            with open(dest_path + b".zst", "wb") as f:
+                f.write(compressed)
         print("Done!")
 
     for idx, asset in enumerate(sorted(asset_store.assets, key=lambda a: a.offset)):
