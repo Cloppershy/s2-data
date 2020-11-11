@@ -91,17 +91,9 @@ class Asset(object):
                 # better chance of assets fitting in binary
                 logging.info(f"Storing compressed asset {compressed_filepath}...")
                 with compressed_filepath.open("wb") as compressed_file:
-                    with io.BytesIO(self.data) as data_reader:
-                        cctx = zstd.ZstdCompressor(level=compression_level)
-                        for retry_timeout in [5, 10, 20, 30]:
-                            try:
-                                cctx.copy_stream(data_reader, compressed_file)
-                                break  # Success
-                            except zstd.ZstdError:
-                                # Compression fails when zstd can't allocate enough memory,
-                                # wait for other threads to free up memory before retrying
-                                time.sleep(retry_timeout)
-                                cctx.copy_stream(data_reader, compressed_file)
+                    cctx = zstd.ZstdCompressor(level=compression_level)
+                    compressed_data = cctx.compress(self.data)
+                    compressed_file.write(compressed_data)
 
             except Exception as exc:
                 self.data = None  # Free memory
