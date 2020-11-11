@@ -63,7 +63,7 @@ def main():
             logging.info("Extracting %s... ", asset.filename.decode())
             asset.extract(EXTRACTED_DIR, asset_store.key)
         except Exception as err:
-            logging.error(err)
+            logging.exception(err)
 
     pool = ThreadPoolExecutor()
     lock = multiprocessing.Lock()

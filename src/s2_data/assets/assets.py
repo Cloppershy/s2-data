@@ -5,6 +5,7 @@ import io
 import os
 import hashlib
 import logging
+import time
 from pathlib import Path
 import zstandard as zstd
 from dataclasses import dataclass
@@ -91,12 +92,28 @@ class Asset(object):
                 # better chance of assets fitting in binary
                 logging.info(f"Storing compressed asset {compressed_filepath}...")
                 with compressed_filepath.open("wb") as compressed_file:
-                    cctx = zstd.ZstdCompressor(level=compression_level)
-                    compressed_data = cctx.compress(self.data)
-                    compressed_file.write(compressed_data)
+                    with io.BytesIO(self.data) as data_reader:
+                        cctx = zstd.ZstdCompressor(level=compression_level)
+
+                        retries = 0
+                        while True:
+                            try:
+                                cctx.copy_stream(data_reader, compressed_file, read_size=32768, write_size=16384)
+                                break
+                            except zstd.ZstdError as zstd_exc:
+                                retries += 1
+                                if "not enough memory" in str(zstd_exc) and retries < 10:
+                                    timeout = min(1.5 ** retries, 20)
+                                    if retries > 4:
+                                        logging.warning(f"Out of memory during compression of {compressed_filepath}, "
+                                                        f"waiting {round(timeout)}s to retry ({retries})...")
+                                    time.sleep(timeout)
+                                else:
+                                    raise
 
             except Exception as exc:
-                logging.error(exc)
+                logging.info(f"Error while storing compressed asset {compressed_filepath}")
+                logging.exception(exc)
                 return None
 
 
