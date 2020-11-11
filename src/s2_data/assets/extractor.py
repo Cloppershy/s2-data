@@ -1,7 +1,9 @@
 import binascii
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 import logging
+import multiprocessing
 
 from .assets import KNOWN_ASSETS, AssetStore, EXTRACTED_DIR, OVERRIDES_DIR
 
@@ -50,17 +52,24 @@ def main():
         seen[asset.name_hash] = asset
 
         filepath = Path(filename.decode())
-        asset.load_data(args.exe)
 
-    def extract_single(asset):
+    def extract_single(lock, asset):
         try:
+            # Loading the data from the exe has to be synchronized
+            # because the exe file handle is a shared resource.
+            with lock:
+                asset.load_data(args.exe)
+
             logging.info("Extracting %s... ", asset.filename.decode())
             asset.extract(EXTRACTED_DIR, asset_store.key)
         except Exception as err:
             logging.error(err)
 
     pool = ThreadPoolExecutor()
-    pool.map(extract_single, seen.values())
+    lock = multiprocessing.Lock()
+    
+    extract_with_lock = partial(extract_single, lock)
+    pool.map(extract_with_lock, seen.values())
 
     for asset in sorted(asset_store.assets, key=lambda a: a.offset):
         name_hash = asset_store.filename_hash(asset.filename)

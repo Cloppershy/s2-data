@@ -117,6 +117,9 @@ class Asset(object):
         with filepath.open("wb") as asset_file:
             asset_file.write(self.data)
 
+        # Free memory after extraction
+        self.data = None
+
 
 class AssetStore(object):
 
