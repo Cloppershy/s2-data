@@ -62,14 +62,28 @@ def main():
 
             logging.info("Extracting %s... ", asset.filename.decode())
             asset.extract(EXTRACTED_DIR, asset_store.key)
+            return True
         except Exception as err:
-            logging.exception(err)
+            logging.warning("Failed to extract %s (%s: %s)", asset.filename.decode(), type(err).__name__, err)
+            return False
 
-    pool = ThreadPoolExecutor()
-    lock = multiprocessing.Lock()
-    
-    extract_with_lock = partial(extract_single, lock)
-    pool.map(extract_with_lock, seen.values())
+    with ThreadPoolExecutor() as pool:
+        lock = multiprocessing.Lock()
+        extract_with_lock = partial(extract_single, lock)
+        successes = list(pool.map(extract_with_lock, seen.values()))
+
+    if not all(successes):
+        logging.info("Retrying previously failed extractions in series")
+        for success, asset in zip(successes, seen.values()):
+            if success:
+                continue  # Already extracted
+            try:
+                asset.load_data(args.exe)
+                logging.info("Extracting %s... ", asset.filename.decode())
+                asset.extract(EXTRACTED_DIR, asset_store.key)
+            except Exception as err:
+                logging.error("Failed to extract %s", asset.filename.decode())
+                logging.exception(err)
 
     for asset in sorted(asset_store.assets, key=lambda a: a.offset):
         name_hash = asset_store.filename_hash(asset.filename)

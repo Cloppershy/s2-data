@@ -78,7 +78,6 @@ class Asset(object):
         compressed_filepath = compressed_path / f"{self.filename.decode()}.zst"
         md5sum_filepath = compressed_path / f"{self.filename.decode()}.md5sum"
 
-
         if self.encrypted:
             try:
                 # Decrypt
@@ -94,27 +93,19 @@ class Asset(object):
                 with compressed_filepath.open("wb") as compressed_file:
                     with io.BytesIO(self.data) as data_reader:
                         cctx = zstd.ZstdCompressor(level=compression_level)
-
-                        retries = 0
-                        while True:
+                        for retry_timeout in [5, 10, 20, 30]:
                             try:
-                                cctx.copy_stream(data_reader, compressed_file, read_size=32768, write_size=16384)
-                                break
-                            except zstd.ZstdError as zstd_exc:
-                                retries += 1
-                                if "not enough memory" in str(zstd_exc) and retries < 10:
-                                    timeout = min(1.5 ** retries, 20)
-                                    if retries > 4:
-                                        logging.warning(f"Out of memory during compression of {compressed_filepath}, "
-                                                        f"waiting {round(timeout)}s to retry ({retries})...")
-                                    time.sleep(timeout)
-                                else:
-                                    raise
+                                cctx.copy_stream(data_reader, compressed_file)
+                                break  # Success
+                            except zstd.ZstdError:
+                                # Compression fails when zstd can't allocate enough memory,
+                                # wait for other threads to free up memory before retrying
+                                time.sleep(retry_timeout)
+                                cctx.copy_stream(data_reader, compressed_file)
 
             except Exception as exc:
-                logging.info(f"Error while storing compressed asset {compressed_filepath}")
-                logging.exception(exc)
-                return None
+                self.data = None  # Free memory
+                raise
 
 
         if filepath.suffix == ".png":
